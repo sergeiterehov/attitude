@@ -1,18 +1,34 @@
 #include <Arduino.h>
+#ifdef USE_HARDWARE_IMU
 #include <BMP085.h>
 #include <I2Cdev.h>
 #include <MPU6050.h>
-#include <MadgwickAHRS.h>
+
+#include "Wire.h"
+#endif
 
 #include "LovyanGFX.h"
-#include "Wire.h"
-#include "lgfx/v1/panel/Panel_ILI9342.hpp"
+#define BOARD_YCD 1
+#define BOARD_UEDX4848 2
+#ifndef BOARD
+#error "BOARD is not defined"
+#endif
+#if BOARD == BOARD_UEDX4848
+#include "LGFX_UEDX4848.h"
+#endif
+#if BOARD == BOARD_YCD
+#include "LGFX_YCD.h"
+#endif
+
+#include "MadgwickAHRS.h"
+#include "math.h"
 #include "matrix2d.h"
 #include "utils.h"
 
-lgfx::LGFX_Device tft;
-lgfx::LGFX_Sprite* canvas;
+LGFX display;
+lgfx::LGFX_Sprite canvas(&display);
 
+#ifdef USE_HARDWARE_IMU
 MPU6050 mpu;
 BMP085 barometer;
 #ifdef MAG_USE_HMC5883L
@@ -22,6 +38,7 @@ HMC5883L mag;
 #ifdef MAG_USE_QMC5883P
 #include <QMC5883P.h>
 QMC5883P mag;
+#endif
 #endif
 
 #define STD_PRESSURE 101325.0f
@@ -55,11 +72,13 @@ struct {
   const float as = 4096.0, gs = 32.8, ms = 32768.0;
   float sea = STD_PRESSURE;
   float ax, ay, az;
+  float g1;
   float gx, gy, gz;
   float mx, my, mz, mmx, mmy, mmz, mMx, mMy, mMz;
 } z_imu;
 
 void initImu() {
+#ifdef USE_HARDWARE_IMU
   Serial.print("Accel/gyro...");
   mpu.initialize();
   Serial.println(mpu.testConnection() ? "OK" : "FAIL");
@@ -76,9 +95,11 @@ void initImu() {
   Serial.print("Barometer...");
   barometer.initialize();
   Serial.println(barometer.testConnection() ? "OK" : "FAIL");
+#endif
 }
 
 void calibrateImu() {
+#ifdef USE_HARDWARE_IMU
   const int samples = 100;
   int32_t sum_ax = 0, sum_ay = 0, sum_az = 0;
   int32_t sum_gx = 0, sum_gy = 0, sum_gz = 0;
@@ -99,13 +120,14 @@ void calibrateImu() {
     delay(5);
   }
 
-  z_imu.ax = (sum_ax / (float)samples);
-  z_imu.ay = (sum_ay / (float)samples);
-  z_imu.az = (sum_az / (float)samples) - z_imu.as;
+  z_imu.ax = (sum_ax / (float)samples) / z_imu.as;
+  z_imu.ay = (sum_ay / (float)samples) / z_imu.as;
+  z_imu.az = (sum_az / (float)samples) / z_imu.as;
+  z_imu.g1 = sqrt(z_imu.ax * z_imu.ax + z_imu.ay * z_imu.ay + z_imu.az * z_imu.az);
 
-  z_imu.gx = (sum_gx / (float)samples);
-  z_imu.gy = (sum_gy / (float)samples);
-  z_imu.gz = (sum_gz / (float)samples);
+  z_imu.gx = (sum_gx / (float)samples) / z_imu.gs;
+  z_imu.gy = (sum_gy / (float)samples) / z_imu.gs;
+  z_imu.gz = (sum_gz / (float)samples) / z_imu.gs;
 
   // Компас калибруется через поиск min/max во время вращения
 
@@ -113,6 +135,7 @@ void calibrateImu() {
   barometer.getTemperatureC();
   barometer.setControl(BMP085_MODE_PRESSURE_3);
   z_imu.sea = barometer.getPressure();
+#endif
 }
 
 void applyCompassCalibration() {
@@ -129,6 +152,7 @@ void applyCompassCalibration() {
 }
 
 void updateImuData() {
+#ifdef USE_HARDWARE_IMU
   static int16_t ax, ay, az;
   static int16_t gx, gy, gz;
   static int16_t mx, my, mz;
@@ -137,13 +161,13 @@ void updateImuData() {
 
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  imu.accel.x = (ax - z_imu.ax) / z_imu.as;
-  imu.accel.y = (ay - z_imu.ay) / z_imu.as;
-  imu.accel.z = (az - z_imu.az) / z_imu.as;
+  imu.accel.x = ax / z_imu.as;
+  imu.accel.y = ay / z_imu.as;
+  imu.accel.z = az / z_imu.as;
 
-  imu.gyro.x = (gx - z_imu.gx) / z_imu.gs;
-  imu.gyro.y = (gy - z_imu.gy) / z_imu.gs;
-  imu.gyro.z = (gz - z_imu.gz) / z_imu.gs;
+  imu.gyro.x = gx / z_imu.gs - z_imu.gx;
+  imu.gyro.y = gy / z_imu.gs - z_imu.gy;
+  imu.gyro.z = gz / z_imu.gs - z_imu.gz;
 
   // Compass
 
@@ -170,9 +194,28 @@ void updateImuData() {
 
   // Filter
 
+  {
+    const float g = sqrt(imu.accel.x * imu.accel.x + imu.accel.y * imu.accel.y + imu.accel.z * imu.accel.z);
+
+    constexpr float in_min = 0.0;
+    constexpr float in_max = 0.2;
+
+    const float x = fabs(g / z_imu.g1 - 1);
+
+    constexpr float out_min = 0.1;
+    constexpr float out_max = 0.9;
+
+    const float run = in_max - in_min;
+    const float rise = out_max - out_min;
+    const float delta = x - in_min;
+
+    imu.filter.beta = fmin(0.9f, fmax(0.1f, (delta * rise) / run + out_min));
+  }
+
   // TODO: Нужно разобраться с вкладом компаса. Может показывает не туда. Может знаки не те...
   // Похоже, что нормально вектор должен указывать куда то в плоскости XY
   imu.filter.updateIMU(imu.gyro.x, imu.gyro.y, imu.gyro.z, imu.accel.x, imu.accel.y, imu.accel.z);
+#endif
 }
 
 struct {
@@ -186,10 +229,11 @@ void update_attitude() {
 
   float acc_angle, dt;
 
-  updateImuData();
-
   dt = (now - prev_measure_at) / 1000.0f;
   prev_measure_at = now;
+
+#ifdef USE_HARDWARE_IMU
+  updateImuData();
 
   attitude.bank = ALPHA * (attitude.bank) + (1.0f - ALPHA) * imu.filter.getRollRadians();
   attitude.pitch = ALPHA * (attitude.pitch) + (1.0f - ALPHA) * imu.filter.getPitchRadians();
@@ -199,28 +243,36 @@ void update_attitude() {
   attitude.heading = ALPHA * (attitude.heading) + (1.0f - ALPHA) * atan2f(-imu.mag.y, imu.mag.x);
 
   attitude.altitude = imu.altitude;
+#endif
+
+#ifdef USE_DEMO
+  attitude.bank = PI * 0.5 * sin((float)now / 2000.0);
+  // attitude.pitch = PI * 0.5 * sin((float)now / 2000.0);
+#endif
 }
 
 void setRGB(uint8_t r, uint8_t g, uint8_t b) {
+#ifdef LED_RED
   digitalWrite(LED_RED, r ? LOW : HIGH);
   digitalWrite(LED_GREEN, g ? LOW : HIGH);
   digitalWrite(LED_BLUE, b ? LOW : HIGH);
+#endif
 }
 
 void render_ui() {
-  float w = canvas->width();
-  float h = canvas->height();
+  float w = canvas.width();
+  float h = canvas.height();
 
-  Serial.printf("%f %f %f\n", imu.mag.x, imu.mag.y, imu.mag.z);
+  // Serial.printf("%f %f %f\n", imu.mag.x, imu.mag.y, imu.mag.z);
 
-  canvas->setTextSize(1);
+  canvas.setTextSize(1);
 
   auto cx = w / 2.0;
   auto cy = h / 2.0;
 
   // Sky + Ground
   {
-    canvas->clear(TFT_BLUE);
+    canvas.clear(TFT_BLUE);
 
     Mat2D t;
     mat2d_identity(&t);
@@ -234,7 +286,7 @@ void render_ui() {
 
     mat2d_transform_point(&t, 0, 0, &ax, &ay);
 
-    canvas->setColor(TFT_BROWN);
+    canvas.setColor(TFT_BROWN);
 
     // Предрасчет нормали к прямой (nx, ny) один раз для экономии ресурсов
     // Прямая проходит через (cx, cy) под углом a.
@@ -282,14 +334,14 @@ void render_ui() {
         }
       }
 
-      if (x_end > x_start) canvas->writeFastHLine(x_start, y, x_end - x_start);
+      if (x_end > x_start) canvas.writeFastHLine(x_start, y, x_end - x_start);
     }
 
     // Horizon line
 
     mat2d_transform_point(&t, -w, 0, &ax, &ay);
     mat2d_transform_point(&t, w, 0, &bx, &by);
-    canvas->drawLine(ax, ay, bx, by, TFT_WHITE);
+    canvas.drawLine(ax, ay, bx, by, TFT_WHITE);
   }
 
   // Pitch scale
@@ -300,13 +352,13 @@ void render_ui() {
     mat2d_rotate(&t, -attitude.bank);
     mat2d_translate(&t, 0, -attitude.pitch * 180.0f / PI * (h / 40));
 
-    auto style = canvas->getTextStyle();
+    auto style = canvas.getTextStyle();
     style.size_x = 1;
     style.size_y = style.size_x;
     style.back_rgb888 = style.fore_rgb888;
-    canvas->setTextStyle(style);
+    canvas.setTextStyle(style);
 
-    auto textHeight = canvas->fontHeight();
+    auto textHeight = canvas.fontHeight();
 
     float ax, ay, bx, by;
 
@@ -322,14 +374,14 @@ void render_ui() {
       if (ay < 0 && by < 0) continue;
       if (ay > h && by > h) break;
 
-      canvas->drawLine(ax, ay, bx, by, TFT_WHITE);
+      canvas.drawLine(ax, ay, bx, by, TFT_WHITE);
 
       if (i != 0 && i % 100 == 0) {
         char text[4] = {0};
         sprintf(text, "%i", abs(i / 10));
-        auto textWidth = canvas->textWidth(text);
-        canvas->drawString(text, ax - 5 - textWidth, ay - textHeight / 2);
-        canvas->drawString(text, bx + 5, by - textHeight / 2);
+        auto textWidth = canvas.textWidth(text);
+        canvas.drawString(text, ax - 5 - textWidth, ay - textHeight / 2);
+        canvas.drawString(text, bx + 5, by - textHeight / 2);
       }
     }
   }
@@ -345,7 +397,7 @@ void render_ui() {
     const float r = h / 2 - 30;
 
     mat2d_transform_point(&t, 0, 0, &ax, &ay);
-    canvas->drawArc(ax, ay, r, r, -60 - 90, 60 - 90, TFT_WHITE);
+    canvas.drawArc(ax, ay, r, r, -60 - 90, 60 - 90, TFT_WHITE);
 
     for (int k = -1; k < 2; k += 2) {
       for (int j = 0; j <= 60; j += (j < 30 ? 10 : 15)) {
@@ -358,7 +410,7 @@ void render_ui() {
 
         mat2d_transform_point(&rt, 0, r, &ax, &ay);
         mat2d_transform_point(&rt, 0, r + (j % 30 == 0 ? 8 : 4), &bx, &by);
-        canvas->drawLine(ax, ay, bx, by, TFT_WHITE);
+        canvas.drawLine(ax, ay, bx, by, TFT_WHITE);
       }
 
       {
@@ -368,7 +420,7 @@ void render_ui() {
         mat2d_transform_point(&rt, 0, r, &cx, &cy);
         mat2d_transform_point(&rt, -2, r + 4, &ax, &ay);
         mat2d_transform_point(&rt, 2, r + 4, &bx, &by);
-        canvas->fillTriangle(ax, ay, bx, by, cx, cy, TFT_WHITE);
+        canvas.fillTriangle(ax, ay, bx, by, cx, cy, TFT_WHITE);
       }
     }
 
@@ -380,8 +432,8 @@ void render_ui() {
       mat2d_transform_point(&rt, 0, r, &cx, &cy);
       mat2d_transform_point(&rt, -6, r - 10, &ax, &ay);
       mat2d_transform_point(&rt, 6, r - 10, &bx, &by);
-      canvas->fillTriangle(ax, ay, bx, by, cx, cy, TFT_YELLOW);
-      canvas->drawTriangle(ax, ay, bx, by, cx, cy, TFT_BLACK);
+      canvas.fillTriangle(ax, ay, bx, by, cx, cy, TFT_YELLOW);
+      canvas.drawTriangle(ax, ay, bx, by, cx, cy, TFT_BLACK);
     }
   }
 
@@ -397,21 +449,21 @@ void render_ui() {
 
     mat2d_transform_point(&t, offset, 0, &ax, &ay);
     mat2d_transform_point(&t, offset + wing, 0, &bx, &by);
-    canvas->drawWideLine(ax, ay, bx, by, 3, TFT_BLACK);
-    canvas->drawWideLine(ax, ay, bx, by, 2, TFT_YELLOW);
+    canvas.drawWideLine(ax, ay, bx, by, 3, TFT_BLACK);
+    canvas.drawWideLine(ax, ay, bx, by, 2, TFT_YELLOW);
 
     mat2d_transform_point(&t, -offset, 0, &ax, &ay);
     mat2d_transform_point(&t, -offset - wing, 0, &bx, &by);
-    canvas->drawWideLine(ax, ay, bx, by, 3, TFT_BLACK);
-    canvas->drawWideLine(ax, ay, bx, by, 2, TFT_YELLOW);
+    canvas.drawWideLine(ax, ay, bx, by, 3, TFT_BLACK);
+    canvas.drawWideLine(ax, ay, bx, by, 2, TFT_YELLOW);
 
     mat2d_transform_point(&t, 0, 0, &ax, &ay);
     mat2d_transform_point(&t, 30, 15, &bx, &by);
-    canvas->drawWedgeLine(ax, ay, bx, by, 1, 4, TFT_BLACK);
-    canvas->drawWedgeLine(ax, ay, bx, by, 0, 3, TFT_YELLOW);
+    canvas.drawWedgeLine(ax, ay, bx, by, 1, 4, TFT_BLACK);
+    canvas.drawWedgeLine(ax, ay, bx, by, 0, 3, TFT_YELLOW);
     mat2d_transform_point(&t, -30, 15, &bx, &by);
-    canvas->drawWedgeLine(ax, ay, bx, by, 1, 4, TFT_BLACK);
-    canvas->drawWedgeLine(ax, ay, bx, by, 0, 3, TFT_YELLOW);
+    canvas.drawWedgeLine(ax, ay, bx, by, 1, 4, TFT_BLACK);
+    canvas.drawWedgeLine(ax, ay, bx, by, 0, 3, TFT_YELLOW);
   }
 
   // Slip/skid
@@ -427,18 +479,18 @@ void render_ui() {
     float ax, ay, bx, by;
 
     mat2d_transform_point(&t, d * attitude.skid, 0, &ax, &ay);
-    canvas->fillCircle(ax, ay, r, TFT_WHITE);
-    canvas->drawCircle(ax, ay, r + 1, TFT_BLACK);
+    canvas.fillCircle(ax, ay, r, TFT_WHITE);
+    canvas.drawCircle(ax, ay, r + 1, TFT_BLACK);
 
     mat2d_transform_point(&t, -r - 1 - lw, -r, &ax, &ay);
     mat2d_transform_point(&t, -r - 1 - lw, r, &bx, &by);
-    canvas->drawWideLine(ax, ay, bx, by, lw, TFT_BLACK);
-    canvas->drawWideLine(ax, ay, bx, by, lw - 1, TFT_WHITE);
+    canvas.drawWideLine(ax, ay, bx, by, lw, TFT_BLACK);
+    canvas.drawWideLine(ax, ay, bx, by, lw - 1, TFT_WHITE);
 
     mat2d_transform_point(&t, r + 1 + lw, -r, &ax, &ay);
     mat2d_transform_point(&t, r + 1 + lw, r, &bx, &by);
-    canvas->drawWideLine(ax, ay, bx, by, lw, TFT_BLACK);
-    canvas->drawWideLine(ax, ay, bx, by, lw - 1, TFT_WHITE);
+    canvas.drawWideLine(ax, ay, bx, by, lw, TFT_BLACK);
+    canvas.drawWideLine(ax, ay, bx, by, lw - 1, TFT_WHITE);
   }
 
   // Heading
@@ -461,24 +513,24 @@ void render_ui() {
       int lh = i % 10 == 0 ? 5 : i % 5 == 0 ? 3 : 1;
 
       mat2d_transform_point(&t, (w - 100) * (i - hdg) / range, 0, &ax, &ay);
-      canvas->drawLine(ax, ay + ph - lh, ax, ay + ph, TFT_WHITE);
+      canvas.drawLine(ax, ay + ph - lh, ax, ay + ph, TFT_WHITE);
 
       if (i % 10 == 0) {
         sprintf(str, "%03i", abs(i));
-        int tw = canvas->textWidth(str);
-        canvas->drawString(str, ax - tw / 2, ay);
+        int tw = canvas.textWidth(str);
+        canvas.drawString(str, ax - tw / 2, ay);
       }
     }
 
     {
-      auto _text_style = canvas->getTextStyle();
+      auto _text_style = canvas.getTextStyle();
       sprintf(str, "%03.0f", abs(hdg));
       mat2d_transform_point(&t, 0, 0, &ax, &ay);
-      canvas->setTextSize(2);
-      int tw = canvas->textWidth(str);
-      canvas->fillRect(ax - tw / 2 - 4, ay - 2, tw + 8, canvas->fontHeight() + 4, TFT_BLACK);
-      canvas->drawString(str, ax - tw / 2, ay);
-      canvas->setTextStyle(_text_style);
+      canvas.setTextSize(2);
+      int tw = canvas.textWidth(str);
+      canvas.fillRect(ax - tw / 2 - 4, ay - 2, tw + 8, canvas.fontHeight() + 4, TFT_BLACK);
+      canvas.drawString(str, ax - tw / 2, ay);
+      canvas.setTextStyle(_text_style);
     }
   }
 
@@ -493,7 +545,7 @@ void render_ui() {
     float ax, ay, bx, by;
 
     mat2d_transform_point(&t, -1, 0, &ax, &ay);
-    canvas->drawLine(ax, ay - h / 2, ax, ay + h / 2, TFT_BLACK);
+    canvas.drawLine(ax, ay - h / 2, ax, ay + h / 2, TFT_BLACK);
 
     float alt = attitude.altitude * 3.28084;  // ft
     char str[32];
@@ -507,81 +559,83 @@ void render_ui() {
       int start = min(0, range_center + range / 2);
 
       mat2d_transform_point(&t, 0, -h * (start - alt) / range, &ax, &ay);
-      canvas->fillRect(ax, ay, 10, h, TFT_RED);
+      canvas.fillRect(ax, ay, 10, h, TFT_RED);
     }
 
     for (int i = max(0, range_center - range / 2); i <= range_center + range / 2; i += step) {
       for (int sub_step = step / 5, j = i + sub_step; j < i + step; j += sub_step) {
         mat2d_transform_point(&t, 0, -h * (j - alt) / range, &ax, &ay);
-        canvas->drawLine(ax, ay, ax + 2, ay, TFT_WHITE);
+        canvas.drawLine(ax, ay, ax + 2, ay, TFT_WHITE);
       }
 
       mat2d_transform_point(&t, 0, -h * (i - alt) / range, &ax, &ay);
-      canvas->drawLine(ax, ay, ax + 5, ay, TFT_WHITE);
+      canvas.drawLine(ax, ay, ax + 5, ay, TFT_WHITE);
 
       sprintf(str, "%i", i);
-      canvas->drawString(str, ax + 8, ay - canvas->fontHeight() / 2);
+      canvas.drawString(str, ax + 8, ay - canvas.fontHeight() / 2);
     }
 
     // Alt cursor
     {
-      auto _text_style = canvas->getTextStyle();
+      auto _text_style = canvas.getTextStyle();
 
       bool is_alt_k = abs(alt) >= 1000;
       bool is_alt_dk = is_alt_k && abs(alt) >= 10000;
 
       mat2d_transform_point(&t, 0, 0, &ax, &ay);
 
-      canvas->setTextSize(2);
-      int bg_h = canvas->fontHeight();
-      canvas->fillRect(ax + 6 - 4, ay - bg_h / 2 - 2, pw - 6 + 8, bg_h + 4, TFT_BLACK);
+      canvas.setTextSize(2);
+      int bg_h = canvas.fontHeight();
+      canvas.fillRect(ax + 6 - 4, ay - bg_h / 2 - 2, pw - 6 + 8, bg_h + 4, TFT_BLACK);
 
       sprintf(str, "%i", (int)(alt) % 1000);
-      canvas->setTextSize(is_alt_dk ? 1 : is_alt_k ? 1.5 : 2);
-      int tw = canvas->textWidth(str);
-      int th = canvas->fontHeight();
-      canvas->drawRightString(str, ax + pw, ay + bg_h / 2 - th + 1);
+      canvas.setTextSize(is_alt_dk ? 1 : is_alt_k ? 1.5 : 2);
+      int tw = canvas.textWidth(str);
+      int th = canvas.fontHeight();
+      canvas.drawRightString(str, ax + pw, ay + bg_h / 2 - th + 1);
 
       if (is_alt_k) {
         sprintf(str, "%i", (int)(abs((int)alt) / 1000));
-        canvas->setTextSize(2);
-        th = canvas->fontHeight();
-        canvas->drawRightString(str, ax + pw - tw, ay + bg_h / 2 - th + 1);
+        canvas.setTextSize(2);
+        th = canvas.fontHeight();
+        canvas.drawRightString(str, ax + pw - tw, ay + bg_h / 2 - th + 1);
       }
 
-      canvas->setTextStyle(_text_style);
+      canvas.setTextStyle(_text_style);
     }
 
     // Pressure
     {
-      auto _text_style = canvas->getTextStyle();
+      auto _text_style = canvas.getTextStyle();
 
-      int bg_h = canvas->fontHeight() + 2;
+      int bg_h = canvas.fontHeight() + 2;
       mat2d_transform_point(&t, 0, h / 2 - bg_h, &ax, &ay);
       if (z_imu.sea == STD_PRESSURE) {
         sprintf(str, "=STD=");
       } else {
         sprintf(str, "%i", (int)(z_imu.sea / 100));
       }
-      int tw = canvas->textWidth(str);
-      canvas->fillRect(ax, ay, pw, bg_h, TFT_BLACK);
-      canvas->setTextColor(TFT_CYAN);
-      canvas->drawString(str, ax + 4, ay + bg_h - canvas->fontHeight());
+      int tw = canvas.textWidth(str);
+      canvas.fillRect(ax, ay, pw, bg_h, TFT_BLACK);
+      canvas.setTextColor(TFT_CYAN);
+      canvas.drawString(str, ax + 4, ay + bg_h - canvas.fontHeight());
 
-      canvas->setTextStyle(_text_style);
+      canvas.setTextStyle(_text_style);
     }
   }
 
   // MARK: State & INPUT
   {
+#if BOOT_BTN != -1
     if (digitalRead(BOOT_BTN) == 0) {
-      canvas->drawString("PRESSED", 0, 0);
+      canvas.drawString("PRESSED", 0, 0);
 
       imu_calibration_request = true;
     }
+#endif
   }
 
-  canvas->pushSprite(0, 0);
+  canvas.pushSprite(0, 0);
 }
 
 void run_attitude_task(void* args) {
@@ -617,68 +671,38 @@ void run_ui_task(void* args) {
 }
 
 void setup() {
+#if BOOT_BTN != -1
   pinMode(BOOT_BTN, INPUT_PULLUP);
+#endif
 
   setRGB(0, 0, 0);
 
+#ifdef LED_RED
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_BLUE, OUTPUT);
+#endif
 
   Serial.begin(115200);
-  while (!Serial) delay(10);
 
-  auto _light = new lgfx::Light_PWM();
-  auto _bus = new lgfx::Bus_SPI();
-  auto _panel = new lgfx::Panel_ILI9342();
+#if BOARD == BOARD_YCD
+  display.setRotation(2);
+#endif
 
-  {
-    auto cfg = _light->config();
-    cfg.pin_bl = TFT_BACKLIGHT;
-    cfg.invert = false;
+  if (!display.init()) ESP_LOGE("MAIN", "TFT INIT FAIL");
 
-    _light->config(cfg);
-    _light->init(0);
-  }
+  display.startWrite();
+  display.clear(TFT_DARKGRAY);
 
-  {
-    auto cfg = _bus->config();
-    cfg.freq_write = 80000000;
-    cfg.freq_read = 16000000;
-    cfg.spi_host = SPI2_HOST;
-    cfg.pin_dc = TFT_DC;
-    cfg.pin_sclk = TFT_SCLK;
-    cfg.pin_miso = TFT_MISO;
-    cfg.pin_mosi = TFT_MOSI;
+  display.light()->setBrightness(255);
 
-    _bus->config(cfg);
-  }
+  canvas.setColorDepth(lgfx::v1::color_depth_t::rgb332_1Byte);
+  canvas.createSprite(display.width(), display.height());
 
-  {
-    auto cfg = _panel->config();
-    cfg.pin_cs = TFT_CS;
-    cfg.pin_rst = TFT_RST;
-    cfg.invert = true;
-
-    _panel->setBus(_bus);
-    _panel->config(cfg);
-
-    tft.setPanel(_panel);
-  }
-
-  if (!tft.init()) ESP_LOGE("MAIN", "TFT INIT FAIL");
-
-  tft.setRotation(2);
-
-  canvas = new lgfx::LGFX_Sprite(&tft);
-  canvas->setColorDepth(lgfx::v1::color_depth_t::rgb332_1Byte);
-  canvas->createSprite(tft.width(), tft.height());
-  canvas->setTextScroll(true);
-
-  _light->init(255);
-
+#ifdef USE_HARDWARE_IMU
   Wire.begin();
   Wire.setClock(400000);
+#endif
 
   initImu();
   delay(50);
