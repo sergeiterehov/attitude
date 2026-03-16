@@ -41,6 +41,17 @@ QMC5883P mag;
 #endif
 #endif
 
+#ifndef IMU_X_K
+#define IMU_X_K -1.0f
+#endif
+#ifndef IMU_Y_K
+#define IMU_Y_K -1.0f
+#endif
+
+#ifndef IMU_G_COMPENSATION
+#define IMU_G_COMPENSATION 0
+#endif
+
 #define STD_PRESSURE 101325.0f
 
 // prev_attitude/next_attitude
@@ -120,13 +131,13 @@ void calibrateImu() {
     delay(5);
   }
 
-  z_imu.ax = (sum_ax / (float)samples) / z_imu.as;
-  z_imu.ay = (sum_ay / (float)samples) / z_imu.as;
+  z_imu.ax = IMU_X_K * (sum_ax / (float)samples) / z_imu.as;
+  z_imu.ay = IMU_Y_K * (sum_ay / (float)samples) / z_imu.as;
   z_imu.az = (sum_az / (float)samples) / z_imu.as;
   z_imu.g1 = sqrt(z_imu.ax * z_imu.ax + z_imu.ay * z_imu.ay + z_imu.az * z_imu.az);
 
-  z_imu.gx = (sum_gx / (float)samples) / z_imu.gs;
-  z_imu.gy = (sum_gy / (float)samples) / z_imu.gs;
+  z_imu.gx = IMU_X_K * (sum_gx / (float)samples) / z_imu.gs;
+  z_imu.gy = IMU_Y_K * (sum_gy / (float)samples) / z_imu.gs;
   z_imu.gz = (sum_gz / (float)samples) / z_imu.gs;
 
   // Компас калибруется через поиск min/max во время вращения
@@ -161,12 +172,12 @@ void updateImuData() {
 
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  imu.accel.x = ax / z_imu.as;
-  imu.accel.y = ay / z_imu.as;
+  imu.accel.x = IMU_X_K * ax / z_imu.as;
+  imu.accel.y = IMU_Y_K * ay / z_imu.as;
   imu.accel.z = az / z_imu.as;
 
-  imu.gyro.x = gx / z_imu.gs - z_imu.gx;
-  imu.gyro.y = gy / z_imu.gs - z_imu.gy;
+  imu.gyro.x = IMU_X_K * gx / z_imu.gs - z_imu.gx;
+  imu.gyro.y = IMU_Y_K * gy / z_imu.gs - z_imu.gy;
   imu.gyro.z = gz / z_imu.gs - z_imu.gz;
 
   // Compass
@@ -194,6 +205,7 @@ void updateImuData() {
 
   // Filter
 
+#if IMU_G_COMPENSATION
   {
     const float g = sqrt(imu.accel.x * imu.accel.x + imu.accel.y * imu.accel.y + imu.accel.z * imu.accel.z);
 
@@ -211,6 +223,7 @@ void updateImuData() {
 
     imu.filter.beta = fmin(0.9f, fmax(0.1f, (delta * rise) / run + out_min));
   }
+#endif
 
   // TODO: Нужно разобраться с вкладом компаса. Может показывает не туда. Может знаки не те...
   // Похоже, что нормально вектор должен указывать куда то в плоскости XY
@@ -626,6 +639,11 @@ void render_ui() {
 
   // MARK: State & INPUT
   {
+    char str[32];
+
+    sprintf(str, "P=%.1f R=%.1f", attitude.pitch, attitude.bank);
+    canvas.drawString(str, 0, h - canvas.fontHeight());
+
 #if BOOT_BTN != -1
     if (digitalRead(BOOT_BTN) == 0) {
       canvas.drawString("PRESSED", 0, 0);
