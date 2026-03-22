@@ -1,10 +1,21 @@
 #include <Arduino.h>
+
 #ifdef USE_HARDWARE_IMU
 #include <BMP085.h>
 #include <I2Cdev.h>
 #include <MPU6050.h>
+#endif
 
-#include "Wire.h"
+#if USE_BNO
+#include <Adafruit_BNO08x.h>
+
+Adafruit_BNO08x bno08x;
+sh2_SensorValue_t sensorValue;
+
+void _init_bno() {
+  bno08x.enableReport(SH2_ARVR_STABILIZED_RV, 5000);
+  bno08x.enableReport(SH2_ACCELEROMETER);
+}
 #endif
 
 #include "LovyanGFX.h"
@@ -21,6 +32,7 @@
 #endif
 
 #include "MadgwickAHRS.h"
+#include "Wire.h"
 #include "math.h"
 #include "matrix2d.h"
 #include "utils.h"
@@ -55,7 +67,9 @@ QMC5883P mag;
 #define STD_PRESSURE 101325.0f
 
 // prev_attitude/next_attitude
+#ifndef ALPHA
 #define ALPHA 0.5f
+#endif
 
 volatile bool imu_calibration_request = false;
 
@@ -106,6 +120,17 @@ void initImu() {
   Serial.print("Barometer...");
   barometer.initialize();
   Serial.println(barometer.testConnection() ? "OK" : "FAIL");
+#endif
+
+#if USE_BNO
+  if (!bno08x.begin_I2C(0x4B, &Wire)) {
+    Serial.println("BNO08x not found at 0x4B");
+    while (1);
+  }
+
+  _init_bno();
+
+  Serial.println("BNO08x OK");
 #endif
 }
 
@@ -232,7 +257,7 @@ void updateImuData() {
 }
 
 struct {
-  float bank = 0, pitch = 0, skid = 0, heading = 0, altitude = 0;
+  float roll = 0, pitch = 0, skid = 0, heading = 0, altitude = 0;
 } attitude;
 
 void update_attitude() {
@@ -248,7 +273,7 @@ void update_attitude() {
 #ifdef USE_HARDWARE_IMU
   updateImuData();
 
-  attitude.bank = ALPHA * (attitude.bank) + (1.0f - ALPHA) * imu.filter.getRollRadians();
+  attitude.roll = ALPHA * (attitude.roll) + (1.0f - ALPHA) * imu.filter.getRollRadians();
   attitude.pitch = ALPHA * (attitude.pitch) + (1.0f - ALPHA) * imu.filter.getPitchRadians();
 
   attitude.skid = imu.accel.y;
@@ -258,8 +283,50 @@ void update_attitude() {
   attitude.altitude = imu.altitude;
 #endif
 
+#if USE_BNO
+  if (bno08x.wasReset()) _init_bno();
+
+  if (bno08x.getSensorEvent(&sensorValue)) {
+    if (sensorValue.sensorId == SH2_ARVR_STABILIZED_RV) {
+      auto sn = sensorValue.un.arvrStabilizedRV;
+
+      // 1. Получаем компоненты исходного кватерниона
+      auto qr = sn.real;
+      auto qi = sn.i;
+      auto qj = sn.j;
+      auto qk = sn.k;
+
+      // 2. Задаем кватернион поправки (Sensor -> Body)
+      const float ow = 0.5f;
+      const float ox = -0.5f;
+      const float oy = -0.5f;
+      const float oz = -0.5f;
+
+      // 3. Выполняем умножение кватернионов: q_corrected = sn * q_offset
+      float cw = qr * ow - qi * ox - qj * oy - qk * oz;
+      float cx = qr * ox + qi * ow + qj * oz - qk * oy;
+      float cy = qr * oy - qi * oz + qj * ow + qk * ox;
+      float cz = qr * oz + qi * oy - qj * ox + qk * ow;
+
+      // 4. Используем исправленные компоненты (cw, cx, cy, cz) для расчета углов
+      float sqr = cw * cw;
+      float sqi = cx * cx;
+      float sqj = cy * cy;
+      float sqk = cz * cz;
+
+      attitude.pitch = asin(2.0 * (cx * cz - cy * cw) / (sqi + sqj + sqk + sqr));
+      attitude.roll = -1.0f * atan2(2.0 * (cy * cz + cx * cw), (-sqi - sqj + sqk + sqr));
+      attitude.heading = atan2(2.0 * (cx * cy + cz * cw), (sqi - sqj - sqk + sqr));
+    } else if (sensorValue.sensorId == SH2_ACCELEROMETER) {
+      // Небольшой фильтр, чтобы сгладить колебания
+      constexpr float AK = 0.8;
+      attitude.skid = AK * attitude.skid + (1.0f - AK) * -1.0f * (sensorValue.un.accelerometer.x / 5.0f);
+    }
+  }
+#endif
+
 #ifdef USE_DEMO
-  attitude.bank = PI * 0.5 * sin((float)now / 2000.0);
+  attitude.roll = PI * 0.5 * sin((float)now / 2000.0);
   // attitude.pitch = PI * 0.5 * sin((float)now / 2000.0);
 #endif
 }
@@ -276,8 +343,6 @@ void render_ui() {
   float w = canvas.width();
   float h = canvas.height();
 
-  // Serial.printf("%f %f %f\n", imu.mag.x, imu.mag.y, imu.mag.z);
-
   canvas.setTextSize(1);
 
   auto cx = w / 2.0;
@@ -290,12 +355,12 @@ void render_ui() {
     Mat2D t;
     mat2d_identity(&t);
     mat2d_translate(&t, cx, cy);
-    mat2d_rotate(&t, -attitude.bank);
+    mat2d_rotate(&t, -attitude.roll);
     mat2d_translate(&t, 0, -attitude.pitch * 180.0f / PI * (h / 40));
 
     float ax, ay, bx, by;
 
-    auto a = attitude.bank;
+    auto a = attitude.roll;
 
     mat2d_transform_point(&t, 0, 0, &ax, &ay);
 
@@ -362,7 +427,7 @@ void render_ui() {
     Mat2D t;
     mat2d_identity(&t);
     mat2d_translate(&t, cx, cy);
-    mat2d_rotate(&t, -attitude.bank);
+    mat2d_rotate(&t, -attitude.roll);
     mat2d_translate(&t, 0, -attitude.pitch * 180.0f / PI * (h / 40));
 
     auto style = canvas.getTextStyle();
@@ -384,17 +449,20 @@ void render_ui() {
       mat2d_transform_point(&t, -len / 2.0, dy, &ax, &ay);
       mat2d_transform_point(&t, len / 2.0, dy, &bx, &by);
 
-      if (ay < 0 && by < 0) continue;
-      if (ay > h && by > h) break;
+      if (ay < 0 && by < 0 || ay > h && by > h) continue;
 
       canvas.drawLine(ax, ay, bx, by, TFT_WHITE);
+
+      auto textWidth_2 = canvas.textWidth("00") / 2;
+
+      mat2d_transform_point(&t, -len / 2.0 - 5 - textWidth_2, dy, &ax, &ay);
+      mat2d_transform_point(&t, len / 2.0 + 5 + textWidth_2, dy, &bx, &by);
 
       if (i != 0 && i % 100 == 0) {
         char text[4] = {0};
         sprintf(text, "%i", abs(i / 10));
-        auto textWidth = canvas.textWidth(text);
-        canvas.drawString(text, ax - 5 - textWidth, ay - textHeight / 2);
-        canvas.drawString(text, bx + 5, by - textHeight / 2);
+        canvas.drawString(text, ax - textWidth_2, ay - textHeight / 2);
+        canvas.drawString(text, bx - textWidth_2, by - textHeight / 2);
       }
     }
   }
@@ -440,7 +508,7 @@ void render_ui() {
     // Roll pointer
     {
       Mat2D rt = t;
-      mat2d_rotate(&rt, PI - attitude.bank);
+      mat2d_rotate(&rt, PI - attitude.roll);
 
       mat2d_transform_point(&rt, 0, r, &cx, &cy);
       mat2d_transform_point(&rt, -6, r - 10, &ax, &ay);
@@ -641,7 +709,7 @@ void render_ui() {
   {
     char str[32];
 
-    sprintf(str, "P=%.1f R=%.1f", attitude.pitch, attitude.bank);
+    sprintf(str, "P=%.1f R=%.1f", attitude.pitch, attitude.roll);
     canvas.drawString(str, 0, h - canvas.fontHeight());
 
 #if BOOT_BTN != -1
@@ -658,7 +726,7 @@ void render_ui() {
 
 void run_attitude_task(void* args) {
   TickType_t xLastWakeTime;
-  const TickType_t xPeriod = 50;
+  const TickType_t xPeriod = 10;
 
   xLastWakeTime = xTaskGetTickCount();
 
@@ -717,10 +785,8 @@ void setup() {
   canvas.setColorDepth(lgfx::v1::color_depth_t::rgb332_1Byte);
   canvas.createSprite(display.width(), display.height());
 
-#ifdef USE_HARDWARE_IMU
   Wire.begin();
   Wire.setClock(400000);
-#endif
 
   initImu();
   delay(50);
