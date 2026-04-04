@@ -709,7 +709,7 @@ void render_ui() {
   {
     char str[32];
 
-    sprintf(str, "P=%.1f R=%.1f", attitude.pitch, attitude.roll);
+    sprintf(str, "P=%.1f R=%.1f H=%.1f", attitude.pitch, attitude.roll, attitude.heading);
     canvas.drawString(str, 0, h - canvas.fontHeight());
 
 #if BOOT_BTN != -1
