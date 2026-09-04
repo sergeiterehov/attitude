@@ -1,17 +1,22 @@
 #include <Arduino.h>
 
-#ifdef USE_HARDWARE_IMU
-#include <BMP085.h>
-#include <I2Cdev.h>
-#include <MPU6050.h>
-#endif
+#define STD_PRESSURE 101325.0f
 
 #if USE_BNO
 #include <Adafruit_BNO08x.h>
 
 Adafruit_BNO08x bno08x;
 sh2_SensorValue_t sensorValue;
+#endif
 
+#if USE_BARO
+#include <BMP085.h>
+BMP085 barometer;
+float sea_level_pressure = STD_PRESSURE;
+bool baro_available = false;
+#endif
+
+#if USE_BNO
 void _init_bno() {
   bno08x.enableReport(SH2_GYRO_INTEGRATED_RV, 5000);
   bno08x.enableReport(SH2_ACCELEROMETER);
@@ -31,7 +36,6 @@ void _init_bno() {
 #include "LGFX_YCD.h"
 #endif
 
-#include "MadgwickAHRS.h"
 #include "Wire.h"
 #include "math.h"
 #include "matrix2d.h"
@@ -40,88 +44,7 @@ void _init_bno() {
 LGFX display;
 lgfx::LGFX_Sprite canvas(&display);
 
-#ifdef USE_HARDWARE_IMU
-MPU6050 mpu;
-BMP085 barometer;
-#ifdef MAG_USE_HMC5883L
-#include <HMC5883L.h>
-HMC5883L mag;
-#endif
-#ifdef MAG_USE_QMC5883P
-#include <QMC5883P.h>
-QMC5883P mag;
-#endif
-#endif
-
-#ifndef IMU_X_K
-#define IMU_X_K -1.0f
-#endif
-#ifndef IMU_Y_K
-#define IMU_Y_K -1.0f
-#endif
-
-#ifndef IMU_G_COMPENSATION
-#define IMU_G_COMPENSATION 0
-#endif
-
-#define STD_PRESSURE 101325.0f
-
-// prev_attitude/next_attitude
-#ifndef ALPHA
-#define ALPHA 0.5f
-#endif
-
-volatile bool imu_calibration_request = false;
-
-struct imu_data_t {
-  Madgwick filter;
-  struct {
-    float x;
-    float y;
-    float z;
-  } accel;
-  struct {
-    float x;
-    float y;
-    float z;
-  } gyro;
-  struct {
-    float x;
-    float y;
-    float z;
-  } mag;
-  float pressure, altitude;
-} imu;
-
-struct {
-  const float as = 4096.0, gs = 32.8, ms = 32768.0;
-  float sea = STD_PRESSURE;
-  float ax, ay, az;
-  float g1;
-  float gx, gy, gz;
-  float mx, my, mz, mmx, mmy, mmz, mMx, mMy, mMz;
-} z_imu;
-
 void initImu() {
-#ifdef USE_HARDWARE_IMU
-  Serial.print("Accel/gyro...");
-  mpu.initialize();
-  Serial.println(mpu.testConnection() ? "OK" : "FAIL");
-
-  mpu.setI2CBypassEnabled(true);
-  mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_8);
-  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_1000);
-  mpu.setDLPFMode(MPU6050_DLPF_BW_20);
-
-  Serial.print("Compass...");
-  mag.initialize();
-  Serial.println(mag.testConnection() ? "OK" : "FAIL");
-
-  Serial.print("Barometer...");
-  barometer.initialize();
-  Serial.println(barometer.testConnection() ? "OK" : "FAIL");
-#endif
-
 #if USE_BNO
   if (!bno08x.begin_I2C(0x4B, &Wire)) {
     Serial.println("BNO08x not found at 0x4B");
@@ -132,132 +55,32 @@ void initImu() {
 
   Serial.println("BNO08x OK");
 #endif
+
+#if USE_BARO
+  Serial.print("Barometer...");
+  barometer.initialize();
+  baro_available = barometer.testConnection();
+  Serial.println(baro_available ? "OK" : "FAIL");
+#endif
 }
 
 void calibrateImu() {
-#ifdef USE_HARDWARE_IMU
-  const int samples = 100;
-  int32_t sum_ax = 0, sum_ay = 0, sum_az = 0;
-  int32_t sum_gx = 0, sum_gy = 0, sum_gz = 0;
-
-  int16_t ax, ay, az, gx, gy, gz;
-
-  for (int i = 0; i < samples; i++) {
-    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
-    sum_ax += ax;
-    sum_ay += ay;
-    sum_az += az;
-
-    sum_gx += gx;
-    sum_gy += gy;
-    sum_gz += gz;
-
-    delay(5);
-  }
-
-  z_imu.ax = IMU_X_K * (sum_ax / (float)samples) / z_imu.as;
-  z_imu.ay = IMU_Y_K * (sum_ay / (float)samples) / z_imu.as;
-  z_imu.az = (sum_az / (float)samples) / z_imu.as;
-  z_imu.g1 = sqrt(z_imu.ax * z_imu.ax + z_imu.ay * z_imu.ay + z_imu.az * z_imu.az);
-
-  z_imu.gx = IMU_X_K * (sum_gx / (float)samples) / z_imu.gs;
-  z_imu.gy = IMU_Y_K * (sum_gy / (float)samples) / z_imu.gs;
-  z_imu.gz = (sum_gz / (float)samples) / z_imu.gs;
-
-  // Компас калибруется через поиск min/max во время вращения
-
+#if USE_BARO
+  if (!baro_available) return;
   barometer.setControl(BMP085_MODE_TEMPERATURE);
   barometer.getTemperatureC();
   barometer.setControl(BMP085_MODE_PRESSURE_3);
-  z_imu.sea = barometer.getPressure();
+  sea_level_pressure = barometer.getPressure();
 #endif
 }
 
 void applyCompassCalibration() {
-  z_imu.mx = (z_imu.mMx + z_imu.mmx) / 2.0;
-  z_imu.my = (z_imu.mMy + z_imu.mmy) / 2.0;
-  z_imu.mz = (z_imu.mMz + z_imu.mmz) / 2.0;
-
-  z_imu.mmx = 999999;
-  z_imu.mmy = 999999;
-  z_imu.mmz = 999999;
-  z_imu.mMx = -999999;
-  z_imu.mMy = -999999;
-  z_imu.mMz = -999999;
-}
-
-void updateImuData() {
-#ifdef USE_HARDWARE_IMU
-  static int16_t ax, ay, az;
-  static int16_t gx, gy, gz;
-  static int16_t mx, my, mz;
-
-  // Accel/gyro
-
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
-  imu.accel.x = IMU_X_K * ax / z_imu.as;
-  imu.accel.y = IMU_Y_K * ay / z_imu.as;
-  imu.accel.z = az / z_imu.as;
-
-  imu.gyro.x = IMU_X_K * gx / z_imu.gs - z_imu.gx;
-  imu.gyro.y = IMU_Y_K * gy / z_imu.gs - z_imu.gy;
-  imu.gyro.z = gz / z_imu.gs - z_imu.gz;
-
-  // Compass
-
-  mag.getHeading(&mx, &my, &mz);
-
-  imu.mag.x = (mx - z_imu.mx) / z_imu.ms;
-  imu.mag.y = (my - z_imu.my) / z_imu.ms;
-  imu.mag.z = (mz - z_imu.mz) / z_imu.ms;
-
-  z_imu.mmx = min(z_imu.mmx, (float)mx);
-  z_imu.mmy = min(z_imu.mmy, (float)my);
-  z_imu.mmz = min(z_imu.mmz, (float)mz);
-  z_imu.mMx = max(z_imu.mMx, (float)mx);
-  z_imu.mMy = max(z_imu.mMy, (float)my);
-  z_imu.mMz = max(z_imu.mMz, (float)mz);
-
-  // Barometer
-
-  barometer.setControl(BMP085_MODE_TEMPERATURE);
-  barometer.getTemperatureC();
-  barometer.setControl(BMP085_MODE_PRESSURE_3);
-  imu.pressure = barometer.getPressure();
-  imu.altitude = 44330 * (1.0 - pow(imu.pressure / z_imu.sea, 0.190284));
-
-  // Filter
-
-#if IMU_G_COMPENSATION
-  {
-    const float g = sqrt(imu.accel.x * imu.accel.x + imu.accel.y * imu.accel.y + imu.accel.z * imu.accel.z);
-
-    constexpr float in_min = 0.0;
-    constexpr float in_max = 0.2;
-
-    const float x = fabs(g / z_imu.g1 - 1);
-
-    constexpr float out_min = 0.1;
-    constexpr float out_max = 0.9;
-
-    const float run = in_max - in_min;
-    const float rise = out_max - out_min;
-    const float delta = x - in_min;
-
-    imu.filter.beta = fmin(0.9f, fmax(0.1f, (delta * rise) / run + out_min));
-  }
-#endif
-
-  // TODO: Нужно разобраться с вкладом компаса. Может показывает не туда. Может знаки не те...
-  // Похоже, что нормально вектор должен указывать куда то в плоскости XY
-  imu.filter.updateIMU(imu.gyro.x, imu.gyro.y, imu.gyro.z, imu.accel.x, imu.accel.y, imu.accel.z);
-#endif
+  // Не используется для BNO
 }
 
 struct {
   float roll = 0, pitch = 0, skid = 0, heading = 0, altitude = 0;
+  uint8_t calibration = 0;
 } attitude;
 
 void update_attitude() {
@@ -270,23 +93,12 @@ void update_attitude() {
   dt = (now - prev_measure_at) / 1000.0f;
   prev_measure_at = now;
 
-#ifdef USE_HARDWARE_IMU
-  updateImuData();
-
-  attitude.roll = ALPHA * (attitude.roll) + (1.0f - ALPHA) * imu.filter.getRollRadians();
-  attitude.pitch = ALPHA * (attitude.pitch) + (1.0f - ALPHA) * imu.filter.getPitchRadians();
-
-  attitude.skid = imu.accel.y;
-
-  attitude.heading = ALPHA * (attitude.heading) + (1.0f - ALPHA) * atan2f(-imu.mag.y, imu.mag.x);
-
-  attitude.altitude = imu.altitude;
-#endif
-
 #if USE_BNO
   if (bno08x.wasReset()) _init_bno();
 
   if (bno08x.getSensorEvent(&sensorValue)) {
+    if (sensorValue.status > 0) attitude.calibration = sensorValue.status;
+
     if (sensorValue.sensorId == SH2_GYRO_INTEGRATED_RV) {
       auto sn = sensorValue.un.gyroIntegratedRV;
 
@@ -323,6 +135,16 @@ void update_attitude() {
       attitude.skid = AK * attitude.skid + (1.0f - AK) * -1.0f * (sensorValue.un.accelerometer.x / 5.0f);
     }
   }
+
+#if USE_BARO
+  if (baro_available) {
+    barometer.setControl(BMP085_MODE_TEMPERATURE);
+    barometer.getTemperatureC();
+    barometer.setControl(BMP085_MODE_PRESSURE_3);
+    float pressure = barometer.getPressure();
+    attitude.altitude = 44330.0f * (1.0f - powf(pressure / sea_level_pressure, 0.190284f));
+  }
+#endif
 #endif
 
 #ifdef USE_DEMO
@@ -673,7 +495,12 @@ void render_ui() {
       int bg_h = canvas.fontHeight();
       canvas.fillRect(ax + 6 - 4, ay - bg_h / 2 - 2, pw - 6 + 8, bg_h + 4, TFT_BLACK);
 
-      sprintf(str, "%i", (int)(alt) % 1000);
+      if (baro_available) {
+        sprintf(str, "%i", (int)(alt) % 1000);
+      } else {
+        sprintf(str, "FAIL");
+        canvas.setTextColor(TFT_RED);
+      }
       canvas.setTextSize(is_alt_dk ? 1 : is_alt_k ? 1.5 : 2);
       int tw = canvas.textWidth(str);
       int th = canvas.fontHeight();
@@ -695,11 +522,19 @@ void render_ui() {
 
       int bg_h = canvas.fontHeight() + 2;
       mat2d_transform_point(&t, 0, h / 2 - bg_h, &ax, &ay);
-      if (z_imu.sea == STD_PRESSURE) {
-        sprintf(str, "=STD=");
+#if USE_BARO
+      if (baro_available) {
+        if (sea_level_pressure == STD_PRESSURE) {
+          sprintf(str, "=STD=");
+        } else {
+          sprintf(str, "%i", (int)(sea_level_pressure / 100));
+        }
       } else {
-        sprintf(str, "%i", (int)(z_imu.sea / 100));
+        sprintf(str, "---");
       }
+#else
+      sprintf(str, "---");
+#endif
       int tw = canvas.textWidth(str);
       canvas.fillRect(ax, ay, pw, bg_h, TFT_BLACK);
       canvas.setTextColor(TFT_CYAN);
@@ -716,11 +551,12 @@ void render_ui() {
     sprintf(str, "P=%.1f R=%.1f H=%.1f", attitude.pitch, attitude.roll, attitude.heading);
     canvas.drawString(str, 0, h - canvas.fontHeight());
 
+    sprintf(str, "CAL:%i", attitude.calibration);
+    canvas.drawString(str, 0, h - canvas.fontHeight() * 2);
+
 #if BOOT_BTN != -1
     if (digitalRead(BOOT_BTN) == 0) {
       canvas.drawString("PRESSED", 0, 0);
-
-      imu_calibration_request = true;
     }
 #endif
   }
@@ -734,15 +570,8 @@ void run_attitude_task(void* args) {
 
   xLastWakeTime = xTaskGetTickCount();
 
-  imu.filter.begin(1000 / xPeriod);
-
   for (;;) {
     update_attitude();
-
-    if (imu_calibration_request) {
-      imu_calibration_request = false;
-      applyCompassCalibration();
-    }
 
     vTaskDelayUntil(&xLastWakeTime, xPeriod);
   }
