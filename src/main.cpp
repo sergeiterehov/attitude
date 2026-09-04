@@ -13,7 +13,7 @@ Adafruit_BNO08x bno08x;
 sh2_SensorValue_t sensorValue;
 
 void _init_bno() {
-  bno08x.enableReport(SH2_ARVR_STABILIZED_RV, 5000);
+  bno08x.enableReport(SH2_GYRO_INTEGRATED_RV, 5000);
   bno08x.enableReport(SH2_ACCELEROMETER);
 }
 #endif
@@ -287,8 +287,8 @@ void update_attitude() {
   if (bno08x.wasReset()) _init_bno();
 
   if (bno08x.getSensorEvent(&sensorValue)) {
-    if (sensorValue.sensorId == SH2_ARVR_STABILIZED_RV) {
-      auto sn = sensorValue.un.arvrStabilizedRV;
+    if (sensorValue.sensorId == SH2_GYRO_INTEGRATED_RV) {
+      auto sn = sensorValue.un.gyroIntegratedRV;
 
       // 1. Получаем компоненты исходного кватерниона
       auto qr = sn.real;
@@ -316,7 +316,7 @@ void update_attitude() {
 
       attitude.pitch = asin(2.0 * (cx * cz - cy * cw) / (sqi + sqj + sqk + sqr));
       attitude.roll = -1.0f * atan2(2.0 * (cy * cz + cx * cw), (-sqi - sqj + sqk + sqr));
-      attitude.heading = atan2(2.0 * (cx * cy + cz * cw), (sqi - sqj - sqk + sqr));
+      attitude.heading = -atan2(2.0 * (cx * cy + cz * cw), (sqi - sqj - sqk + sqr));
     } else if (sensorValue.sensorId == SH2_ACCELEROMETER) {
       // Небольшой фильтр, чтобы сгладить колебания
       constexpr float AK = 0.8;
@@ -585,19 +585,23 @@ void render_ui() {
     int ph = 24;
     char str[32];
 
-    float hdg = abs(180.0 * attitude.heading / PI);
+    float hdg_deg = attitude.heading * 180.0f / PI;
+    if (hdg_deg < 0) hdg_deg += 360.0f;
 
     int range = 50;
     for (int i = 0; i < 360; i += 1) {
-      if (i < hdg - range / 2 || i > hdg + range / 2) continue;
+      int diff = i - (int)hdg_deg;
+      if (diff > 180) diff -= 360;
+      if (diff < -180) diff += 360;
+      if (abs(diff) > range / 2) continue;
 
       int lh = i % 10 == 0 ? 5 : i % 5 == 0 ? 3 : 1;
 
-      mat2d_transform_point(&t, (w - 100) * (i - hdg) / range, 0, &ax, &ay);
+      mat2d_transform_point(&t, (w - 100) * diff / (float)range, 0, &ax, &ay);
       canvas.drawLine(ax, ay + ph - lh, ax, ay + ph, TFT_WHITE);
 
       if (i % 10 == 0) {
-        sprintf(str, "%03i", abs(i));
+        sprintf(str, "%03i", i);
         int tw = canvas.textWidth(str);
         canvas.drawString(str, ax - tw / 2, ay);
       }
@@ -605,7 +609,7 @@ void render_ui() {
 
     {
       auto _text_style = canvas.getTextStyle();
-      sprintf(str, "%03.0f", abs(hdg));
+      sprintf(str, "%03.0f", hdg_deg);
       mat2d_transform_point(&t, 0, 0, &ax, &ay);
       canvas.setTextSize(2);
       int tw = canvas.textWidth(str);
