@@ -71,6 +71,20 @@ void draw_attitude(lgfx::LGFX_Sprite* canvas, const AppState& state) {
     canvas->drawLine(ax, ay, bx, by, TFT_WHITE);
   }
 
+  // BNO085 reference horizon (зелёная линия)
+  {
+    Mat2D t;
+    mat2d_identity(&t);
+    mat2d_translate(&t, cx, cy);
+    mat2d_rotate(&t, -state.attitude.ref_roll);
+    mat2d_translate(&t, 0, -state.attitude.ref_pitch * 180.0f / PI * (h / 40));
+
+    float ax, ay, bx, by;
+    mat2d_transform_point(&t, -w, 0, &ax, &ay);
+    mat2d_transform_point(&t, w, 0, &bx, &by);
+    canvas->drawLine(ax, ay, bx, by, TFT_GREEN);
+  }
+
   // Pitch scale
   {
     Mat2D t;

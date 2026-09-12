@@ -6,6 +6,7 @@
 
 struct Attitude {
   float roll = 0, pitch = 0, skid = 0, heading = 0, altitude = 0;
+  float ref_roll = 0, ref_pitch = 0;
   uint8_t calibration = 0;
 };
 

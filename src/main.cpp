@@ -76,7 +76,9 @@ void setup() {
   if (!display.init()) ESP_LOGE("MAIN", "TFT INIT FAIL");
 
   display.startWrite();
-  display.clear(TFT_DARKGRAY);
+  display.clear(TFT_BLACK);
+  display.setTextColor(TFT_GREEN);
+  display.drawString("TEREHOV RESEARCH", 120, 100);
   display.light()->setBrightness(255);
   display.endWrite();
 
