@@ -10,6 +10,7 @@ class LGFX : public lgfx::LGFX_Device {
   lgfx::Light_PWM _light;
   lgfx::Bus_SPI _bus;
   lgfx::Panel_ILI9342 _panel;
+  lgfx::Touch_XPT2046 _touch;
 
   LGFX(void) {
     {
@@ -41,6 +42,24 @@ class LGFX : public lgfx::LGFX_Device {
 
       _panel.setBus(&_bus);
       _panel.config(cfg);
+    }
+
+    {
+      auto cfg = _touch.config();
+
+      cfg.x_min = 400;
+      cfg.x_max = 3800;
+      cfg.y_min = 400;
+      cfg.y_max = 3800;
+
+      cfg.pin_cs = 33;
+      cfg.pin_int = 36;
+
+      cfg.bus_shared = true;
+      cfg.spi_host = SPI2_HOST;
+
+      _touch.config(cfg);
+      _panel.setTouch(&_touch);
     }
 
     _panel.light(&_light);

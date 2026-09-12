@@ -11,6 +11,9 @@ struct Attitude {
 
 struct AppState {
   Attitude attitude;
+  struct {
+    int32_t x, y;
+  } pointer;
   float sea_level_pressure = STD_PRESSURE;
   bool baro_available = false;
 };

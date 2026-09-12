@@ -53,10 +53,6 @@ void calibrateImu() {
 #endif
 }
 
-void applyCompassCalibration() {
-  // Не используется для BNO
-}
-
 void update_attitude() {
   static unsigned long prev_measure_at = 0;
 

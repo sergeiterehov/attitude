@@ -13,10 +13,9 @@
 
 #include "Wire.h"
 #include "sensors.h"
-#include "input.h"
+#include "ui_altitude.h"
 #include "ui_attitude.h"
 #include "ui_compass.h"
-#include "ui_altitude.h"
 #include "ui_status.h"
 
 LGFX display;
@@ -48,7 +47,8 @@ void run_ui_task(void* args) {
   xLastWakeTime = xTaskGetTickCount();
 
   for (;;) {
-    handleTouch();
+    display.getTouch(&app_state.pointer.x, &app_state.pointer.y);
+
     render_ui();
     vTaskDelayUntil(&xLastWakeTime, xPeriod);
   }
@@ -77,10 +77,8 @@ void setup() {
 
   display.startWrite();
   display.clear(TFT_DARKGRAY);
-
   display.light()->setBrightness(255);
-
-  initTouch();
+  display.endWrite();
 
   canvas.setColorDepth(lgfx::v1::color_depth_t::rgb332_1Byte);
   canvas.createSprite(display.width(), display.height());
@@ -91,7 +89,6 @@ void setup() {
   initImu();
   delay(50);
   calibrateImu();
-  applyCompassCalibration();
 
   xTaskCreatePinnedToCore(run_ui_task, "UI", 4096, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(run_attitude_task, "Attitude", 4096, NULL, 2, NULL, 0);
