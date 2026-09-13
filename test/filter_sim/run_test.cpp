@@ -14,11 +14,12 @@
 #include "filter_backend.h"
 #include "mahony_backend.h"
 #include "complementary_backend.h"
+#include "adaptive_mahony_backend.h"
 
 #define MAX_LINE 1024
 
 void print_usage(const char* prog) {
-  fprintf(stderr, "Usage: %s --filter <mahony|complementary>\n", prog);
+  fprintf(stderr, "Usage: %s --filter <mahony|complementary|adaptive_mahony>\n", prog);
   fprintf(stderr, "  Reads sim_data.csv from stdin, writes results.csv to stdout\n");
 }
 
@@ -46,6 +47,8 @@ int main(int argc, char** argv) {
     filter = new MahonyBackend();
   } else if (strcmp(filter_name, "complementary") == 0) {
     filter = new ComplementaryBackend();
+  } else if (strcmp(filter_name, "adaptive_mahony") == 0) {
+    filter = new AdaptiveMahonyBackend();
   } else {
     fprintf(stderr, "Unknown filter: %s\n", filter_name);
     return 1;
